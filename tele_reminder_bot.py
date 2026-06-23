@@ -1,5 +1,4 @@
 import datetime
-from email import message
 import pytz
 import os
 import logging
@@ -12,6 +11,46 @@ import asyncio
 from types import SimpleNamespace
 
 linebreak = "----------------------------------------"
+
+#timezone used throughout the bot for scheduling and display
+sg_tz = pytz.timezone("Asia/Singapore")
+
+#task persistence
+TASKS_FILE = "tasks.json"
+
+#read the saved tasks back into a list; empty list if the file is missing or corrupt
+def load_tasks():
+    try:
+        with open(TASKS_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+#overwrite the file with the current list of tasks
+def save_tasks(tasks):
+    with open(TASKS_FILE, "w") as f:
+        json.dump(tasks, f, indent=2)
+
+#append one task and persist
+def add_task(user_id, item, time_str):
+    tasks = load_tasks()
+    tasks.append({"user_id": user_id, "item": item, "time": time_str})
+    save_tasks(tasks)
+
+#remove a task matching this user + item from the list and persist
+def remove_task(user_id, item):
+    tasks = [t for t in load_tasks() if not (t["user_id"] == user_id and t["item"] == item)]
+    save_tasks(tasks)
+
+#makes sure task names are unique for a given user, appending " (1)", " (2)", etc. if necessary
+def unique_item_name(job_queue, user_id, item):
+    existing = {job.data for job in job_queue.jobs() if job.chat_id == user_id}
+    if item not in existing:
+        return item
+    n = 1
+    while f"{item} ({n})" in existing:
+        n += 1
+    return f"{item} ({n})"
 
 # Enable logging
 logging.basicConfig(
@@ -63,6 +102,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()  # Acknowledge the callback query
 
+    #only authorized users may drive the buttons (CallbackQueryHandler has no filter)
+    if update.effective_user.id not in ALLOWED_USERS:
+        await query.message.reply_text("🐴 You are not authorized to use this bot.")
+        return
+
     #buttons that run straight away (no extra text needed from the user)
     immediate = {
         'help': help_command,
@@ -106,7 +150,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     #the original functions read context.args, so populate it from the message text
     context.args = update.message.text.split()
-    await func(update, context)
+    await func(update, context) #call the original function with the faked context.args
     await start(update, context)  # return to the start menu when done
 
 #/help command, shows a list of available commands
@@ -115,8 +159,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     "/hello - Say hello to the bot\n" 
     "/chat - Chat with the AI\n" 
     "/schedule - Schedule a reminder. Requires item,date and time in YYYY-MM-DD and HH:MM format\n"
-    "/ai_schedule - Schedule a reminder with AI parsing. No strict format required\n"
+    "/ai_schedule - Schedule a reminder with AI parsing, no strict format required\n"
     "/list - List all scheduled tasks\n"
+    "/delete - Delete a scheduled task, given the exact task description\n"
     "/help - Show this help message\n\n"
     "The bot can also be operated using the buttons after typing /start. Click on a button to execute the corresponding command."
     )
@@ -146,22 +191,24 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 #daily reminder function, sends a daily reminder to all authorized users
 async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     for user_id in ALLOWED_USERS:
-        await context.bot.send_message(chat_id=user_id, text="🐴 Scheduled tasks for today:")
+        await context.bot.send_message(chat_id=user_id, text="🐴 Daily reminder of scheduled tasks!")
+        await list_tasks(SimpleNamespace(message=SimpleNamespace(chat_id=user_id), effective_user=SimpleNamespace(id=user_id)), context)
 
 #list all tasks in history sorted by date and time.
 async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    sg_tz = pytz.timezone("Asia/Singapore")
     #fetch tasks from database, sorted by date and time
     jobs = context.job_queue.jobs()
-    tasks = [{"item": job.data, "time": job.next_t.strftime("%Y-%m-%d %H:%M:%S")} for job in jobs if job.data is not None]
+    tasks = [{"item": job.data, "time": job.next_t.astimezone(sg_tz).strftime("%Y-%m-%d %H:%M:%S")}
+             for job in jobs
+             if job.data is not None and job.next_t is not None and job.chat_id == user_id]
 
     #tasks format {
     #    "item": "Go to the gym", 
     #    "time": "2026-06-24 15:30:00"
     #}
     if not tasks:
-        await context.bot.send_message(chat_id=user_id, text="🐴 No tasks in schedule.")
+        await context.bot.send_message(chat_id=user_id, text="🐴 Wow no tasks at all, I'm going to go eat grass then...")
         return
     time_sorted_tasks = sorted(tasks, key=lambda x: x['time'])  # Sort tasks by time
     curr_date = None
@@ -184,7 +231,8 @@ async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 #alarm module, sends a reminder to the user at the scheduled time
 async def alarm(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
-    await context.bot.send_message(chat_id=job.chat_id, text=f"🐴 Reminder:\n {job.data}")
+    await context.bot.send_message(chat_id=job.chat_id, text=f"🐴 Task Reminder:\n {job.data}")
+    remove_task(job.chat_id, job.data)  #remove task from the file after it has been triggered
 
 #schedule the task using the /schedule command, takes in a message and a time in HH:MM format
 #fallback if AI scheduling is down or does not work, requires strict formatting but is more likely to schedule correctly if the user follows the format
@@ -201,7 +249,6 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try: 
 
         naive_dt = datetime.datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
-        sg_tz = pytz.timezone("Asia/Singapore")
         scheduled_time = sg_tz.localize(naive_dt)
         
         if scheduled_time < datetime.datetime.now(sg_tz):
@@ -212,12 +259,15 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("❗Invalid date or time format. Please use YYYY-MM-DD for date and HH:MM for time.")
         return
     
+    #if an identical task already exists for this user, append " (1)", " (2)", ... to keep it distinct
+    message = unique_item_name(context.job_queue, user_id, message)
     await update.message.reply_text(
                                     f"✅Scheduled {message} at {time} on {date}."
                                     f"\n\n"
                                     f"You will be reminded at the scheduled time."
                                     )
     context.job_queue.run_once(alarm, when=scheduled_time, chat_id=user_id, data=message)
+    add_task(user_id, message, scheduled_time.strftime("%Y-%m-%d %H:%M:%S"))
 
 #scheduling with AI parsing
 async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -230,7 +280,6 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     try: 
         # Use AI to parse the message and extract the time
-        sg_tz = pytz.timezone("Asia/Singapore")
         now = datetime.datetime.now(sg_tz)
         current_time_str = now.strftime("%Y-%m-%d %H:%M")
         
@@ -244,6 +293,7 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         2. Convert the requested time to a 24-hour format (YYYY-MM-DD HH:MM:SS).
         3. If no date is specified, assume today (or tomorrow if the requested time has already passed today).
         4. If no time is specified, default to 09:00:00.
+        5. "task" must ALWAYS be a non-empty string. Never return null, None, or an empty value for "task"; if the task is unclear, use the word "reminder".
         
         Return ONLY a valid JSON object matching this exact structure. Do not include markdown blocks or any other text:
         {{"task": "clean room", "target_datetime": "YYYY-MM-DD HH:MM:SS"}}
@@ -258,10 +308,21 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         item = data.get("task")
         datetime_str = data.get("target_datetime")
-        
+
+        #fallback in case the AI ignores the prompt and returns a null/empty task
+        if not item:
+            item = "reminder"
+
         # Convert the extracted datetime string to a datetime object
         scheduled_time = datetime.datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
         actual_time = sg_tz.localize(scheduled_time)  # Localize timezone
+
+        if actual_time < datetime.datetime.now(sg_tz):
+            await update.message.reply_text("❗That time has already passed. Please choose a future time and be more specific.")
+            return
+
+        #if an identical task already exists for this user, append " (1)", " (2)", ... to keep it distinct
+        item = unique_item_name(context.job_queue, user_id, item)
 
         await update.message.reply_text(f""
                                         f"✅Scheduled {item} at {actual_time.strftime('%Y-%m-%d %H:%M:%S')}.\n"
@@ -269,6 +330,7 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                                         f"You will be reminded at the scheduled time.\n"
                                         f"⚠️AI may make mistakes, please double check the scheduled time and date. If it is wrong, please reschedule with a more specific time and date.")
         context.job_queue.run_once(alarm, when=actual_time, chat_id=user_id, data=item)
+        add_task(user_id, item, actual_time.strftime("%Y-%m-%d %H:%M:%S"))
 
     except Exception as e:
         await update.message.reply_text("❗Something went wrong, please try again and be more specific. Make sure to include a time and a date for the AI to automatically format!")
@@ -287,6 +349,7 @@ async def delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for job in jobs:
         if job.data == task_to_delete and job.chat_id == user_id:
             job.schedule_removal()
+            remove_task(user_id, task_to_delete)  # also drop it from the file
             await update.message.reply_text(f"✅Deleted task: {task_to_delete}")
             return
 
@@ -313,9 +376,27 @@ if __name__ == "__main__":
 
     #job queue for daily reminders
     job_queue = app.job_queue
-    job_queue.run_daily(daily_reminder, time=datetime.time(hour=9, minute=0, second=0, tzinfo=pytz.timezone("Asia/Singapore")))  # Sends reminder at 9:00 AM every day
+
+    #restore tasks saved to file, re-arming future ones and dropping any that already passed
+    now = datetime.datetime.now(sg_tz)
+    still_valid = []
+    #build a list of still-valid tasks and re-schedule them in the job queue per user, dropping any that have already passed
+    for t in load_tasks():
+        try:
+            scheduled_time = sg_tz.localize(datetime.datetime.strptime(t["time"], "%Y-%m-%d %H:%M:%S"))
+            if scheduled_time > now:
+                job_queue.run_once(alarm, when=scheduled_time, chat_id=t["user_id"], data=t["item"])
+                still_valid.append(t)
+        except (KeyError, TypeError, ValueError) as e:
+            #skip bad entries
+            logging.warning(f"Skipping bad task in {TASKS_FILE}: {t} ({e})")
+            continue
+    save_tasks(still_valid)
+
+    #daily reminder job, runs at 9:00 AM Singapore time every day
+    job_queue.run_daily(daily_reminder, time=datetime.time(hour=9, minute=0, second=0, tzinfo=sg_tz))  # Sends reminder at 9:00 AM every day
     
-    #buttons
+    #buttons for bot navigation appear after starting the bot.
     app.add_handler(CallbackQueryHandler(button_handler))
 
     #plain text from authorized users feeds button prompts (chat/schedule/ai_schedule)

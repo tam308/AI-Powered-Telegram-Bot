@@ -48,6 +48,9 @@ htmlcov/
 *.sqlite3
 *.db
 
+# Persisted bot state
+tasks.json
+
 # Editors / OS
 .vscode/
 .idea/
