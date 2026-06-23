@@ -10,7 +10,7 @@ This bot was built to schedule easy reminders without the need for heavy formatt
 /chat - Chat with the AI
 /schedule - Schedule a reminder. Requires item,date and time in YYYY-MM-DD and HH:MM format
 /ai_sched - Schedule a reminder with AI parsing. No strict format required
-/help - Show this help message
+/help - Display help message with list of commands
 ```
 
 Access to scheduling/chat commands is restricted to authorized Telegram user IDs
@@ -44,5 +44,4 @@ python tele_reminder_bot.py
 ## Notes
 
 - Timezone is currently set to `Asia/Singapore` timezone, update as required.
-- The `.env` file holds secrets and is excluded from version control via `.gitignore`.
 - AI scheduling may not be accurate, so double-check its contents.
