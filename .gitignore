@@ -1,4 +1,4 @@
-# ---- Secrets / environment ----
+# Secrets / environment
 .env
 .env.*
 !.env.example
@@ -7,7 +7,10 @@
 secrets.json
 credentials.json
 
-# ---- Python ----
+#backup files
+backups/
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -23,7 +26,7 @@ eggs/
 *.egg
 .installed.cfg
 
-# ---- Virtual environments ----
+# Virtual environments
 .venv/
 venv/
 env/
@@ -31,7 +34,7 @@ ENV/
 env.bak/
 venv.bak/
 
-# ---- Testing / coverage ----
+# Testing / coverage
 .pytest_cache/
 .coverage
 .coverage.*
@@ -40,12 +43,12 @@ htmlcov/
 .nox/
 .cache
 
-# ---- Logs / databases ----
+# Logs / databases
 *.log
 *.sqlite3
 *.db
 
-# ---- Editors / OS ----
+# Editors / OS
 .vscode/
 .idea/
 *.swp
