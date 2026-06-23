@@ -4,14 +4,15 @@ This bot was built to schedule easy reminders without the need for heavy formatt
 
 ## Available commands
 
-```
-/start - Start the bot
-/hello - Say hello to the bot
-/chat - Chat with the AI
-/schedule - Schedule a reminder. Requires item,date and time in YYYY-MM-DD and HH:MM format
-/ai_sched - Schedule a reminder with AI parsing. No strict format required
-/help - Display help message with list of commands
-```
+- `/start` - Start the bot
+- `/hello` - Say hello to the bot
+- `/chat` - Chat with the AI
+- `/schedule` - Schedule a reminder. Requires item, date and time in `YYYY-MM-DD` and `HH:MM` format
+- `/ai_schedule` - Schedule a reminder with AI parsing, no strict format required
+- `/list` - List all scheduled tasks
+- `/help` - Show this help message
+
+The bot can also be operated using the buttons after typing `/start`. Click on a button to execute the corresponding command.
 
 Access to scheduling/chat commands is restricted to authorized Telegram user IDs
 (see `ALLOWED_USERS` in [tele_reminder_bot.py](tele_reminder_bot.py)).

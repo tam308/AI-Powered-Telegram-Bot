@@ -115,7 +115,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     "/hello - Say hello to the bot\n" 
     "/chat - Chat with the AI\n" 
     "/schedule - Schedule a reminder. Requires item,date and time in YYYY-MM-DD and HH:MM format\n"
-    "/s - Schedule a reminder with AI parsing. No strict format required\n"
+    "/ai_schedule - Schedule a reminder with AI parsing. No strict format required\n"
     "/list - List all scheduled tasks\n"
     "/help - Show this help message\n\n"
     "The bot can also be operated using the buttons after typing /start. Click on a button to execute the corresponding command."
