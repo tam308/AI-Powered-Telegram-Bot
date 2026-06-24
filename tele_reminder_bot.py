@@ -100,6 +100,9 @@ ALLOWED_USERS = [
     if entry.strip()
 ]
 
+#the owner's Telegram user ID - the ONLY account allowed to run the hidden /reload command
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+
 #startup message
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
      #buttons for bot navigation appear after starting the bot.
@@ -515,6 +518,32 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         pass
 
+#hidden owner-only command: re-reads .env and updates the authorized users live (no restart needed).
+#deliberately NOT in /help or the buttons - only the OWNER_ID account can use it.
+async def reload_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    #silently ignore anyone who isn't the owner
+    if update.effective_user.id != OWNER_ID:
+        logging.warning(f"Non-owner {update.effective_user.id} tried /reload")
+        return
+
+    global ALLOWED_USERS
+    load_dotenv(override=True)  # re-read the .env file, replacing the values loaded at startup
+    ALLOWED_USERS = [
+        int(entry.split(":")[-1].strip())
+        for entry in os.getenv("ALLOWED_USERS", "").split(",")
+        if entry.strip()
+    ]
+    #keep the slash-command auth filter in sync with the new list and add new users, drop removed ones
+    current = set(allowed_users.user_ids)
+    target = set(ALLOWED_USERS)
+    if target - current:
+        allowed_users.add_user_ids(list(target - current))
+    if current - target:
+        allowed_users.remove_user_ids(list(current - target))
+
+    logging.info(f"Owner reloaded .env: {len(ALLOWED_USERS)} users authorized")
+    await update.message.reply_text(f"🐴 Reloaded .env — {len(ALLOWED_USERS)} users now authorized.")
+
 if __name__ == "__main__":
     #initialises the bot
     app = ApplicationBuilder().token(telegram_token).build()
@@ -523,7 +552,10 @@ if __name__ == "__main__":
 
     #basic commands that anyone can use
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command)) 
+    app.add_handler(CommandHandler("help", help_command))
+
+    #hidden owner-only command - no filter here; reload_config checks OWNER_ID itself and ignores everyone else
+    app.add_handler(CommandHandler("reload", reload_config))
 
     #only allow authorized users for below commands
     #app.add_handler binds to slash commands, filters=allowed_users ensures only authorized users can use the command
