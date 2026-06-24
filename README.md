@@ -7,6 +7,7 @@ This bot was built to schedule easy reminders without the need for heavy formatt
 - `/start` - Start the bot
 - `/hello` - Say hello to the bot
 - `/chat` - Chat with the AI
+- `/generate_image` - Generate an image with AI
 - `/schedule` - Schedule a reminder. Requires item, date and time in `YYYY-MM-DD` and `HH:MM` format
 - `/ai_schedule` - Schedule a reminder with AI parsing, no strict format required
 - `/list` - List all scheduled tasks organised by date and time
@@ -46,4 +47,5 @@ python tele_reminder_bot.py
 ## Notes
 
 - Timezone is currently set to `Asia/Singapore` timezone, update as required.
+- Image generation requires a paid plan 
 - AI scheduling may not be accurate, so double-check its contents.

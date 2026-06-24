@@ -7,9 +7,11 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, filters, CallbackQueryHandler, MessageHandler
 from google import genai
+from google.genai import types
 import asyncio
 from types import SimpleNamespace
 
+#https://ai.google.dev/gemini-api/docs
 
 #job queue functions like a priority queue
 #RESPOND to a message user typed like a slash command: await update.message.reply_text("")
@@ -96,20 +98,21 @@ ALLOWED_USERS = [
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
      #buttons for bot navigation appear after starting the bot.
     keyboard = [
-        [InlineKeyboardButton("🙋 Hello", callback_data='hello'), InlineKeyboardButton("💬 Chat", callback_data='chat')],
-        [InlineKeyboardButton("🗓️ Schedule", callback_data='schedule'), InlineKeyboardButton("📋 List Tasks", callback_data='list_tasks')],
-        [InlineKeyboardButton("🗑️ Delete Task", callback_data='delete_helper'), InlineKeyboardButton("❓ Help", callback_data='help')],
-        [InlineKeyboardButton("🌟 AI Schedule", callback_data='ai_schedule')],
+        [InlineKeyboardButton("🙋 Hello", callback_data='hello'), InlineKeyboardButton("❓ Help", callback_data='help')],
+        [InlineKeyboardButton("🌟 AI Schedule", callback_data='ai_schedule'), InlineKeyboardButton("🗓️ Schedule", callback_data='schedule')],
+        [InlineKeyboardButton("📋 List Tasks", callback_data='list_tasks'), InlineKeyboardButton("🗑️ Delete Task", callback_data='delete_helper')],
+        [InlineKeyboardButton("💬 AI Chat", callback_data='chat'), InlineKeyboardButton("🖼️ Generate Image", callback_data='generate_image')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("YO YO YO It's ya boy the one and only HORSEBOT🐴\n" \
     "Only authorized users can use this bot!\nChoose an option below or type a slash command.", reply_markup = reply_markup)
    
-#response to the buttons that require input
+#response to the buttons that require input (sent to user and wait for reply)
 PROMPTS = {
     'chat': "🐴 Type your AI prompt.",
     'schedule': "🐴 Type your task in the following format:\n<item> <YYYY-MM-DD> <HH:MM>",
     'ai_schedule': "🐴 What would you like to schedule? Data is automatically parsed using AI.",
+    'generate_image': "🐴 Describe the image you'd like me to generate.",
 }
 
 #function to handle all button presses
@@ -144,7 +147,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data['awaiting'] = query.data
         await query.message.reply_text(PROMPTS[query.data])
 
-#explanation:
+#explanation for text_input:
 
 #catches the user's next text message after they press an input button, fakes
 #context.args from that text, and hands off to the original command function.
@@ -170,6 +173,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         'chat': chat,
         'schedule': schedule,
         'ai_schedule': ai_schedule,
+        'generate_image': generate_image,
         'delete_main': delete_main,  # the number reply after delete_helper showed the list
     }
     func = handlers.get(awaiting)
@@ -186,6 +190,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("Available commands:\n/start - Start the bot\n" 
     "/hello - Say hello to the bot\n" 
     "/chat - Chat with the AI\n" 
+    "/generate_image - Generate an image from a prompt using AI\n"
     "/schedule - Schedule a reminder. Requires item, date and time in YYYY-MM-DD and HH:MM format\n"
     "/ai_schedule - Schedule a reminder with AI parsing, no strict format required\n"
     "/list - List all scheduled tasks\n"
@@ -215,6 +220,53 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(res.text)
     except Exception as e:
         await update.message.reply_text(f"An error occurred: {e}")
+
+#image generation
+#https://ai.google.dev/gemini-api/docs/generate-content/image-generation
+#uses generateContent API NOT Interactions API
+#image models require a paid Google plan; on the free tier this hits a quota/limit error
+async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    prompt = " ".join(context.args)  # Extracts the prompt from the command arguments
+
+    if not prompt:
+        await update.message.reply_text("❗Please provide a prompt for image generation.")
+        return
+
+    await update.message.reply_text("🐴 Generating image...")
+    await asyncio.sleep(1)
+    #per-user temp file in case of concurrent generate requests
+    image_path = f"generated_image_{update.effective_user.id}.png"
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-image",
+            contents=[prompt],
+            config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
+        )
+        #the image lives in the part that has inline_data; text parts (if any) are skipped
+        image_bytes = None
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_bytes = part.inline_data.data  #raw bytes of the image
+                break
+
+        if image_bytes is None:
+            await update.message.reply_text("🐴 The model didn't return an image, try rewording your prompt.")
+            return
+
+        #write the image bytes to a temporary file
+        with open(image_path, "wb") as f:
+            f.write(image_bytes)
+        #send the generated image to user
+        with open(image_path, "rb") as f:
+            await update.message.reply_photo(photo=f, caption="🐴 Here is your generated image!")
+    except Exception as e:
+        #keep the real error in the logs, show the user a friendly message instead
+        logging.warning(f"generate_image failed for user {update.effective_user.id}: {e}")
+        await update.message.reply_text("🐴 You have hit API limits for image generation, try again another time!")
+    finally:
+        #always clean up the temp file, even if generation or sending failed
+        if os.path.exists(image_path):
+            os.remove(image_path)
 
 #daily reminder function, sends a daily reminder to all authorized users
 async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -440,7 +492,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("ai_schedule", ai_schedule, filters=allowed_users))
     app.add_handler(CommandHandler("list", list_tasks, filters=allowed_users))
     app.add_handler(CommandHandler("delete", delete_helper, filters=allowed_users)) #delete_helper shows a numbered list and waits for a number reply, delete_main actually deletes the task
-
+    app.add_handler(CommandHandler("generate_image", generate_image, filters=allowed_users)) #generate an image from a prompt using AI
+    
     #job queue for daily reminders
     job_queue = app.job_queue
 
