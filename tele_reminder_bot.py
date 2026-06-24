@@ -10,10 +10,29 @@ from google import genai
 import asyncio
 from types import SimpleNamespace
 
+
+#job queue functions like a priority queue
+#RESPOND to a message user typed like a slash command: await update.message.reply_text("")
+#SEND a message using the bot: await context.bot.send_message(...)
+#context.job_queue.jobs() returns a tuple of all scheduled jobs
+#A single job object looks like this:
+# Job(
+#    data="Go to the gym",                  # message data
+#    chat_id=1838348666,                    # user ID
+#    next_t=datetime.datetime(2026, 6, 24, 15, 30, tzinfo=<UTC>), # The exact execution time
+#    name="1838348666",                     # optional name (defaults to chat_id if not set)
+#    removed=False                          # T/F tracking if the job was cancelled
+#)
+
+
 linebreak = "----------------------------------------"
 
 #timezone used throughout the bot for scheduling and display
 sg_tz = pytz.timezone("Asia/Singapore")
+
+#day month year modified display format
+DISPLAY_DATE = "%d %B %Y"             # 24 June 2026
+DISPLAY_DATETIME = "%d %B %Y, %H:%M"  # 24 June 2026, 15:30
 
 #task persistence
 TASKS_FILE = "tasks.json"
@@ -77,13 +96,10 @@ ALLOWED_USERS = [
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
      #buttons for bot navigation appear after starting the bot.
     keyboard = [
-        [InlineKeyboardButton("Help", callback_data='help')],
-        [InlineKeyboardButton("Hello", callback_data='hello')],
-        [InlineKeyboardButton("Chat", callback_data='chat')],
-        [InlineKeyboardButton("Schedule", callback_data='schedule')],
-        [InlineKeyboardButton("AI Schedule", callback_data='ai_schedule')],
-        [InlineKeyboardButton("List Tasks", callback_data='list_tasks')],
-        [InlineKeyboardButton("Delete Task", callback_data='delete_task')],
+        [InlineKeyboardButton("🙋 Hello", callback_data='hello'), InlineKeyboardButton("💬 Chat", callback_data='chat')],
+        [InlineKeyboardButton("🗓️ Schedule", callback_data='schedule'), InlineKeyboardButton("📋 List Tasks", callback_data='list_tasks')],
+        [InlineKeyboardButton("🗑️ Delete Task", callback_data='delete_helper'), InlineKeyboardButton("❓ Help", callback_data='help')],
+        [InlineKeyboardButton("🌟 AI Schedule", callback_data='ai_schedule')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("YO YO YO It's ya boy the one and only HORSEBOT🐴\n" \
@@ -94,7 +110,6 @@ PROMPTS = {
     'chat': "🐴 Type your AI prompt.",
     'schedule': "🐴 Type your task in the following format:\n<item> <YYYY-MM-DD> <HH:MM>",
     'ai_schedule': "🐴 What would you like to schedule? Data is automatically parsed using AI.",
-    'delete_task': "🐴 Type the exact task description to delete."
 }
 
 #function to handle all button presses
@@ -112,6 +127,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         'help': help_command,
         'hello': hello,
         'list_tasks': list_tasks,
+        'delete_helper': delete_helper,  # shows a numbered list, then waits for a number reply
     }
 
     if query.data in immediate:
@@ -128,8 +144,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data['awaiting'] = query.data
         await query.message.reply_text(PROMPTS[query.data])
 
+#explanation:
+
 #catches the user's next text message after they press an input button, fakes
 #context.args from that text, and hands off to the original command function.
+
+#when you tap a prompt button, button_handler writes a note like context.user_data['awaiting'] = 'schedule'. .pop('awaiting', None) 
+# does two things in one line:
+#Reads the value of 'awaiting' (e.g. 'schedule') into the local variable awaiting.
+#Deletes it from the dictionary.
+#so if awaiting is none, the user is not in a prompt flow, and we just show the start menu again. If awaiting is not none, we look up the corresponding function in the handlers dictionary, and call it with a faked context.args built from the user's text message.
+#if its in a flow, we call the original function with the faked context.args
+#and we can run the functions we want
+
+#so basically this function just bridges stuff between msg/button press to the actual functions
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     awaiting = context.user_data.pop('awaiting', None)  # pop so it only fires once
     if awaiting is None:
@@ -142,7 +170,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         'chat': chat,
         'schedule': schedule,
         'ai_schedule': ai_schedule,
-        'delete_task': delete_task,
+        'delete_main': delete_main,  # the number reply after delete_helper showed the list
     }
     func = handlers.get(awaiting)
     if func is None:
@@ -158,10 +186,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("Available commands:\n/start - Start the bot\n" 
     "/hello - Say hello to the bot\n" 
     "/chat - Chat with the AI\n" 
-    "/schedule - Schedule a reminder. Requires item,date and time in YYYY-MM-DD and HH:MM format\n"
+    "/schedule - Schedule a reminder. Requires item, date and time in YYYY-MM-DD and HH:MM format\n"
     "/ai_schedule - Schedule a reminder with AI parsing, no strict format required\n"
     "/list - List all scheduled tasks\n"
-    "/delete - Delete a scheduled task, given the exact task description\n"
+    "/delete - Delete a scheduled task by picking its number from a list\n"
     "/help - Show this help message\n\n"
     "The bot can also be operated using the buttons after typing /start. Click on a button to execute the corresponding command."
     )
@@ -212,19 +240,26 @@ async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     time_sorted_tasks = sorted(tasks, key=lambda x: x['time'])  # Sort tasks by time
     curr_date = None
+    day_count = 0  #idx for numbering tasks within a day
 
     message = "🐴 All scheduled tasks: \n\n"
 
     for task in time_sorted_tasks:
+        if task['item'] is None:
+            continue
+
         task_date = task['time'].split(' ')[0]  # Extract the date part
         task_time = task['time'].split(' ')[1]  # Extract the time part
 
-        if task_date != curr_date and task['item'] is not None: #print date headers
+        if task_date != curr_date: #print date headers
             curr_date = task_date
-            message += f"\n⏰ Tasks for {curr_date}:\n"
+            day_count = 0  # restart numbering for the new day
+            #reformat YYYY-MM-DD into a friendlier "24 June 2026" for the header
+            display_date = datetime.datetime.strptime(task_date, "%Y-%m-%d").strftime(DISPLAY_DATE)
+            message += f"\n📄 Tasks for {display_date}:\n"
 
-        if task['item'] is not None:
-            message += f"{task['item']} at {task_time}\n"
+        day_count += 1
+        message += f"{day_count}. {task['item']} ➡️ {task_time}\n"
  
     await context.bot.send_message(chat_id=user_id, text=message)
 
@@ -262,7 +297,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     #if an identical task already exists for this user, append " (1)", " (2)", ... to keep it distinct
     message = unique_item_name(context.job_queue, user_id, message)
     await update.message.reply_text(
-                                    f"✅Scheduled {message} at {time} on {date}."
+                                    f"✅Scheduled {message} at {time} on {scheduled_time.strftime(DISPLAY_DATE)}."
                                     f"\n\n"
                                     f"You will be reminded at the scheduled time."
                                     )
@@ -325,7 +360,7 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         item = unique_item_name(context.job_queue, user_id, item)
 
         await update.message.reply_text(f""
-                                        f"✅Scheduled {item} at {actual_time.strftime('%Y-%m-%d %H:%M:%S')}.\n"
+                                        f"✅Scheduled {item} at {actual_time.strftime(DISPLAY_DATETIME)}.\n"
                                         f"\n"
                                         f"You will be reminded at the scheduled time.\n"
                                         f"⚠️AI may make mistakes, please double check the scheduled time and date. If it is wrong, please reschedule with a more specific time and date.")
@@ -333,27 +368,59 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         add_task(user_id, item, actual_time.strftime("%Y-%m-%d %H:%M:%S"))
 
     except Exception as e:
+        logging.warning(f"ai_schedule failed for user {user_id}: {e}")  # keep visibility into AI/JSON failures
         await update.message.reply_text("❗Something went wrong, please try again and be more specific. Make sure to include a time and a date for the AI to automatically format!")
         return
 
-#delete existing task
-async def delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
-        await update.message.reply_text("❗Please provide the exact task description to delete.")
+#delete helper function that shows a numbered list and waits for the user to reply with a number
+async def delete_helper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    #only this user's live, scheduled jobs, sorted by time so the numbering is stable
+    jobs = sorted(
+        [job for job in context.job_queue.jobs()
+         if job.data is not None and job.next_t is not None and job.chat_id == user_id],
+        key=lambda j: j.next_t
+    )
+
+    if not jobs:
+        await update.message.reply_text("🐴 No tasks to delete, I'm off to eat grass...")
         return
 
-    task_to_delete = " ".join(context.args)
-    user_id = update.effective_user.id
-    jobs = context.job_queue.jobs()
+    #remember the displayed order so the reply number maps back to the right task
+    #this is the hand off to delete_main, which will actually remove the task from the job queue and the file
+    #the next time a message is recieved, it pops the awaiting flag, and calls delete_main
+    context.user_data['delete_options'] = [job.data for job in jobs]
+    context.user_data['awaiting'] = 'delete_main'
 
-    for job in jobs:
+    message = "🐴 Which task do you want to delete? Reply with its number:\n\n"
+    for i, job in enumerate(jobs, start=1):
+        task_time = job.next_t.astimezone(sg_tz).strftime(DISPLAY_DATETIME)
+        message += f"{i}. {job.data} ({task_time})\n"
+    await update.message.reply_text(message)
+
+#deletes the task the user picked by number from the list, main delete function that actually removes the task from the job queue and the file
+async def delete_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    options = context.user_data.pop('delete_options', None)
+    if not options:
+        await update.message.reply_text("🐴 Nothing to delete right now. Type /delete to start again.")
+        return
+
+    choice = " ".join(context.args).strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(options)):
+        await update.message.reply_text(f"❗Please reply with a number between 1 and {len(options)}. Type /delete to try again.")
+        return
+
+    task_to_delete = options[int(choice) - 1]
+    user_id = update.effective_user.id
+
+    for job in context.job_queue.jobs():
         if job.data == task_to_delete and job.chat_id == user_id:
             job.schedule_removal()
             remove_task(user_id, task_to_delete)  # also drop it from the file
             await update.message.reply_text(f"✅Deleted task: {task_to_delete}")
             return
 
-    await update.message.reply_text(f"❗Task not found: {task_to_delete}")
+    await update.message.reply_text(f"❗Task not found (it may have already fired): {task_to_delete}")
 
 if __name__ == "__main__":
     #initialises the bot
@@ -372,12 +439,12 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("schedule", schedule, filters=allowed_users))
     app.add_handler(CommandHandler("ai_schedule", ai_schedule, filters=allowed_users))
     app.add_handler(CommandHandler("list", list_tasks, filters=allowed_users))
-    app.add_handler(CommandHandler("delete", delete_task, filters=allowed_users))
+    app.add_handler(CommandHandler("delete", delete_helper, filters=allowed_users)) #delete_helper shows a numbered list and waits for a number reply, delete_main actually deletes the task
 
     #job queue for daily reminders
     job_queue = app.job_queue
 
-    #restore tasks saved to file, re-arming future ones and dropping any that already passed
+    #restore tasks saved to file
     now = datetime.datetime.now(sg_tz)
     still_valid = []
     #build a list of still-valid tasks and re-schedule them in the job queue per user, dropping any that have already passed
