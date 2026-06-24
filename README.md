@@ -9,8 +9,8 @@ This bot was built to schedule easy reminders without the need for heavy formatt
 - `/chat` - Chat with the AI
 - `/schedule` - Schedule a reminder. Requires item, date and time in `YYYY-MM-DD` and `HH:MM` format
 - `/ai_schedule` - Schedule a reminder with AI parsing, no strict format required
-- `/list` - List all scheduled tasks
-- `/delete` - Delete a scheduled task, given the exact task description
+- `/list` - List all scheduled tasks organised by date and time
+- `/delete` - Delete a scheduled task from the list
 - `/help` - Show this help message
 
 The bot can also be operated using the buttons after typing `/start`. Click on a button to execute the corresponding command.

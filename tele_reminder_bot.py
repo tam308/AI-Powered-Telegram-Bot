@@ -249,7 +249,7 @@ async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             continue
 
         task_date = task['time'].split(' ')[0]  # Extract the date part
-        task_time = task['time'].split(' ')[1]  # Extract the time part
+        task_time = task['time'].split(' ')[1][:5]  # Extract the time part (HH:MM, drop seconds)
 
         if task_date != curr_date: #print date headers
             curr_date = task_date
@@ -273,7 +273,7 @@ async def alarm(context: ContextTypes.DEFAULT_TYPE) -> None:
 #fallback if AI scheduling is down or does not work, requires strict formatting but is more likely to schedule correctly if the user follows the format
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args or len(context.args) < 3:
-        await update.message.reply_text("❗Please provide a item to schedule in the following format:\n/schedule <item> <date> <time> <date in YYYY-MM-DD format> <time in HH:MM format>")
+        await update.message.reply_text("❗Please provide a item to schedule in the following format:\n/schedule <item> <date in YYYY-MM-DD format> <time in HH:MM format>")
         return
     
     time = context.args[-1] #extracts the time from the command arguments
