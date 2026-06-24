@@ -77,6 +77,9 @@ def unique_item_name(job_queue, user_id, item):
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+#supress info level logging
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("google_genai").setLevel(logging.WARNING)
 
 # Load the hidden keys from your .env file
 load_dotenv()
@@ -122,6 +125,10 @@ PROMPTS = {
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()  # Acknowledge the callback query
+
+    #log which button was pressed
+    user = update.effective_user
+    logging.info(f"Button press from {user.first_name} ({user.id}): {query.data}")
 
     #only authorized users may drive the buttons (CallbackQueryHandler has no filter)
     if update.effective_user.id not in ALLOWED_USERS:
@@ -218,9 +225,16 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🐴 Horsing around...")
     await asyncio.sleep(1)
     try:
-        chat = client.chats.create(model="gemini-flash-lite-latest")
+        #cap the reply length so it always fits in one Telegram message
+        chat = client.chats.create(
+            model="gemini-flash-lite-latest",
+            config=types.GenerateContentConfig(
+                max_output_tokens=800,
+                system_instruction="Keep your answer concise and under 3000 characters.",
+            ),
+        )
         res = chat.send_message(message)
-        await update.message.reply_text(res.text)
+        await update.message.reply_text(res.text or "🐴 (no response)")
     except Exception as e:
         await update.message.reply_text(f"An error occurred: {e}")
 
@@ -324,6 +338,13 @@ async def alarm(context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(chat_id=job.chat_id, text=f"🐴 Task Reminder:\n {job.data}")
     remove_task(job.chat_id, job.data)  #remove task from the file after it has been triggered
 
+# if reminder, missed (e.g. the bot was briefly busy at that second)
+#fires 60 second after if missed.
+#basically this function is a wrapper around the alarm function that schedules it to run once at the specified time, with a 60 second grace period for misfires.
+def schedule_alarm(job_queue, when, chat_id, data):
+    job_queue.run_once(alarm, when=when, chat_id=chat_id, data=data,
+                       job_kwargs={"misfire_grace_time": 60})
+
 #schedule the task using the /schedule command, takes in a message and a time in HH:MM format
 #fallback if AI scheduling is down or does not work, requires strict formatting but is more likely to schedule correctly if the user follows the format
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -356,7 +377,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                                     f"\n\n"
                                     f"You will be reminded at the scheduled time."
                                     )
-    context.job_queue.run_once(alarm, when=scheduled_time, chat_id=user_id, data=message)
+    schedule_alarm(context.job_queue, scheduled_time, user_id, message)
     add_task(user_id, message, scheduled_time.strftime("%Y-%m-%d %H:%M:%S"))
 
 #scheduling with AI parsing
@@ -388,11 +409,11 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         Return ONLY a valid JSON object matching this exact structure. Do not include markdown blocks or any other text:
         {{"task": "clean room", "target_datetime": "YYYY-MM-DD HH:MM:SS"}}
         """
+        await update.message.reply_text("Parsing with Gemini...")
         chat = client.chats.create(model="gemini-flash-lite-latest")
         res = chat.send_message(prompt)
 
         #clean data and parse JSON
-        await update.message.reply_text("Parsing with Gemini...")
         text = res.text.strip().replace("```json", "").replace("```", "").strip()  # Clean up any markdown formatting
         data = json.loads(text)
 
@@ -419,7 +440,7 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                                         f"\n"
                                         f"You will be reminded at the scheduled time.\n"
                                         f"⚠️AI may make mistakes, please double check the scheduled time and date. If it is wrong, please reschedule with a more specific time and date.")
-        context.job_queue.run_once(alarm, when=actual_time, chat_id=user_id, data=item)
+        schedule_alarm(context.job_queue, actual_time, user_id, item)
         add_task(user_id, item, actual_time.strftime("%Y-%m-%d %H:%M:%S"))
 
     except Exception as e:
@@ -477,6 +498,23 @@ async def delete_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     await update.message.reply_text(f"❗Task not found (it may have already fired): {task_to_delete}")
 
+#logs every incoming message per user
+async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    msg = update.effective_message
+    if user and msg:
+        logging.info(f"Message from {user.first_name} ({user.id}): {msg.text or '[non-text message]'}")
+
+#global error handler for any exceptions raised in handlers
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.warning(f"Update failed: {context.error}")
+    #try to let the user know, but ignore it if the network is the very thing that's down
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text("🐴 Something went wrong, please try again in a moment.")
+    except Exception:
+        pass
+
 if __name__ == "__main__":
     #initialises the bot
     app = ApplicationBuilder().token(telegram_token).build()
@@ -508,7 +546,7 @@ if __name__ == "__main__":
         try:
             scheduled_time = sg_tz.localize(datetime.datetime.strptime(t["time"], "%Y-%m-%d %H:%M:%S"))
             if scheduled_time > now:
-                job_queue.run_once(alarm, when=scheduled_time, chat_id=t["user_id"], data=t["item"])
+                schedule_alarm(job_queue, scheduled_time, t["user_id"], t["item"])
                 still_valid.append(t)
         except (KeyError, TypeError, ValueError) as e:
             #skip bad entries
@@ -524,6 +562,12 @@ if __name__ == "__main__":
 
     #plain text from authorized users feeds button prompts (chat/schedule/ai_schedule)
     app.add_handler(MessageHandler(allowed_users & filters.TEXT & ~filters.COMMAND, text_input)) #not COMMAND so that it doesn't trigger on slash commands
+
+    #logs all messages and button presses to console for debugging
+    app.add_handler(MessageHandler(filters.ALL, log_message), group=-1)
+
+    #catches ALL errors
+    app.add_error_handler(error_handler)
 
     #run the bot
     print("Horsebot is up and running...")
