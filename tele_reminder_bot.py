@@ -86,12 +86,15 @@ gemini_key = os.getenv("GEMINI_API_KEY")
 # GenAI API key here
 client = genai.Client(api_key=gemini_key)
 
-# List of authorized Telegram User IDs, loaded from .env (comma-separated)
+# List of authorized users, loaded from .env
+# Each entry is a "name:id" pair for readability
+# the name is just a label, only the id (the part after the last ":") is used.
+# A plain id with no name still works.
 # Use @userinfobot to get one's user ID
 ALLOWED_USERS = [
-    int(uid.strip())
-    for uid in os.getenv("ALLOWED_USERS", "").split(",")
-    if uid.strip()
+    int(entry.split(":")[-1].strip())
+    for entry in os.getenv("ALLOWED_USERS", "").split(",")
+    if entry.strip()
 ]
 
 #startup message

@@ -51,6 +51,9 @@ htmlcov/
 # Persisted bot state
 tasks.json
 
+# Local server / deployment notes (not part of the project)
+server-instructions/
+
 # Editors / OS
 .vscode/
 .idea/
