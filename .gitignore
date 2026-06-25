@@ -53,6 +53,7 @@ tasks.json
 
 # Local server / deployment notes (not part of the project)
 server-instructions/
+keep_alive.sh
 
 # Editors / OS
 .vscode/

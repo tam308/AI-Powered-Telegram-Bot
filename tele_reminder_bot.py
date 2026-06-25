@@ -5,6 +5,7 @@ import logging
 import json
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Forbidden, BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, filters, CallbackQueryHandler, MessageHandler
 from google import genai
 from google.genai import types
@@ -39,8 +40,8 @@ DISPLAY_DATETIME = "%d %B %Y, %H:%M"  # 24 June 2026, 15:30
 #task persistence
 TASKS_FILE = "tasks.json"
 
-#read the saved tasks back into a list; empty list if the file is missing or corrupt
-def load_tasks():
+#read the saved tasks back into a list, empty list if the file is missing or corrupt
+def load_tasks_helper():
     try:
         with open(TASKS_FILE, "r") as f:
             return json.load(f)
@@ -48,23 +49,23 @@ def load_tasks():
         return []
 
 #overwrite the file with the current list of tasks
-def save_tasks(tasks):
+def save_tasks_helper(tasks):
     with open(TASKS_FILE, "w") as f:
         json.dump(tasks, f, indent=2)
 
 #append one task and persist
-def add_task(user_id, item, time_str):
-    tasks = load_tasks()
+def add_task_helper(user_id, item, time_str):
+    tasks = load_tasks_helper()
     tasks.append({"user_id": user_id, "item": item, "time": time_str})
-    save_tasks(tasks)
+    save_tasks_helper(tasks)
 
 #remove a task matching this user + item from the list and persist
-def remove_task(user_id, item):
-    tasks = [t for t in load_tasks() if not (t["user_id"] == user_id and t["item"] == item)]
-    save_tasks(tasks)
+def remove_task_helper(user_id, item):
+    tasks = [t for t in load_tasks_helper() if not (t["user_id"] == user_id and t["item"] == item)]
+    save_tasks_helper(tasks)
 
 #makes sure task names are unique for a given user, appending " (1)", " (2)", etc. if necessary
-def unique_item_name(job_queue, user_id, item):
+def unique_item_name_helper(job_queue, user_id, item):
     existing = {job.data for job in job_queue.jobs() if job.chat_id == user_id}
     if item not in existing:
         return item
@@ -104,7 +105,7 @@ ALLOWED_USERS = [
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 #startup message
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
      #buttons for bot navigation appear after starting the bot.
     keyboard = [
         [InlineKeyboardButton("🙋 Hello", callback_data='hello'), InlineKeyboardButton("❓ Help", callback_data='help')],
@@ -141,9 +142,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     #buttons that run straight away (no extra text needed from the user)
     immediate = {
         'help': help_command,
-        'hello': hello,
-        'list_tasks': list_tasks,
-        'delete_helper': delete_helper,  # shows a numbered list, then waits for a number reply
+        'hello': hello_command,
+        'list_tasks': list_tasks_command,
+        'delete_helper': delete_command,  # shows a numbered list, then waits for a number reply
     }
 
     if query.data in immediate:
@@ -154,7 +155,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             effective_user=update.effective_user,
         )
         await immediate[query.data](fake_update, context)
-        await start(fake_update, context)  # return to the start menu when done
+        await start_command(fake_update, context)  # return to the start menu when done
     elif query.data in PROMPTS:
         #remember which command we're collecting input for, then ask for it
         context.user_data['awaiting'] = query.data
@@ -174,20 +175,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 #and we can run the functions we want
 
 #so basically this function just bridges stuff between msg/button press to the actual functions
-async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     awaiting = context.user_data.pop('awaiting', None)  # pop so it only fires once
     if awaiting is None:
         #default state: not in a prompt flow, so show the welcome message + buttons
         #happens if the user types text without pressing a button first, or after a command has finished
-        await start(update, context)
+        await start_command(update, context)
         return
 
     handlers = {
-        'chat': chat,
-        'schedule': schedule,
-        'ai_schedule': ai_schedule,
-        'generate_image': generate_image,
-        'delete_main': delete_main,  # the number reply after delete_helper showed the list
+        'chat': chat_command,
+        'schedule': schedule_command,
+        'ai_schedule': ai_schedule_command,
+        'generate_image': generate_image_command,
+        'delete_main': delete_main_command,  # the number reply after delete_command showed the list
     }
     func = handlers.get(awaiting)
     if func is None:
@@ -196,7 +197,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     #the original functions read context.args, so populate it from the message text
     context.args = update.message.text.split()
     await func(update, context) #call the original function with the faked context.args
-    await start(update, context)  # return to the start menu when done
+    await start_command(update, context)  # return to the start menu when done
 
 #/help command, shows a list of available commands
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -213,12 +214,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 #/hello command, echoes back the user's first name
-async def hello(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def hello_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f'Hello {update.effective_user.first_name}, I\'m a horse. 🐴')
 
 #/chat command, sends the user's message to the AI and returns the response
 #behaves like typical AI chatbot.
-async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = " ".join(context.args) #extracts the message from the command arguments
 
     if not message:
@@ -244,8 +245,8 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 #image generation
 #https://ai.google.dev/gemini-api/docs/generate-content/image-generation
 #uses generateContent API NOT Interactions API
-#image models require a paid Google plan; on the free tier this hits a quota/limit error
-async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+#image models require a paid Google plan, on the free tier this hits a quota/limit error
+async def generate_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = " ".join(context.args)  # Extracts the prompt from the command arguments
 
     if not prompt:
@@ -262,7 +263,7 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             contents=[prompt],
             config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
         )
-        #the image lives in the part that has inline_data; text parts (if any) are skipped
+        #the image lives in the part that has inline_data, text parts (if any) are skipped
         image_bytes = None
         for part in response.candidates[0].content.parts:
             if part.inline_data is not None:
@@ -290,12 +291,27 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 #daily reminder function, sends a daily reminder to all authorized users
 async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    #fan out one self-retrying job per user, so a proxy blip for one doesn't affect the others
     for user_id in ALLOWED_USERS:
+        context.job_queue.run_once(daily_for_user, when=0, data=user_id,
+                                   job_kwargs={"misfire_grace_time": 60})
+
+#sends one user's daily summary on a transient failure it re-adds itself +1 minute until it sends
+#this calls daily_for_user() recurringly if it fails.
+async def daily_for_user(context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = context.job.data
+    try:
         await context.bot.send_message(chat_id=user_id, text="🐴 Daily reminder of scheduled tasks!")
-        await list_tasks(SimpleNamespace(message=SimpleNamespace(chat_id=user_id), effective_user=SimpleNamespace(id=user_id)), context)
+        await list_tasks_command(SimpleNamespace(message=SimpleNamespace(chat_id=user_id), effective_user=SimpleNamespace(id=user_id)), context)
+    except (Forbidden, BadRequest) as e:
+        logging.warning(f"daily reminder to {user_id} permanently failed ({e}), skipping")
+    except Exception as e:
+        logging.warning(f"daily reminder to {user_id} failed, re-queuing for +1 min: {e}")
+        context.job_queue.run_once(daily_for_user, when=60, data=user_id,
+                                   job_kwargs={"misfire_grace_time": 60})
 
 #list all tasks in history sorted by date and time.
-async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def list_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     #fetch tasks from database, sorted by date and time
     jobs = context.job_queue.jobs()
@@ -335,22 +351,34 @@ async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
  
     await context.bot.send_message(chat_id=user_id, text=message)
 
-#alarm module, sends a reminder to the user at the scheduled time
+#alarm: the job that "pops" a reminder off the queue and sends it.
+#if the send fails it re-adds itself +1 minute and keeps
+#retrying every minute until the message actually goes through, then removes the task from the file.
 async def alarm(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
-    await context.bot.send_message(chat_id=job.chat_id, text=f"🐴 Task Reminder:\n {job.data}")
-    remove_task(job.chat_id, job.data)  #remove task from the file after it has been triggered
+    try:
+        await context.bot.send_message(chat_id=job.chat_id, text=f"🐴 Task Reminder:\n {job.data}")
+        remove_task_helper(job.chat_id, job.data)  # only drop it from the file once it actually sent
+    except (Forbidden, BadRequest) as e:
+        #permanent: user blocked/deleted the bot or the chat is invalid - stop retrying, drop the reminder
+        logging.warning(f"alarm to {job.chat_id} permanently failed ({e}), dropping reminder")
+        remove_task_helper(job.chat_id, job.data)
+    except Exception as e:
+        #transient failure (proxy 503, network blip) - re-add +1 minute and try again until it sends
+        logging.warning(f"alarm to {job.chat_id} failed, re-queuing for +1 min: {e}")
+        schedule_alarm_helper(context.job_queue, 60, job.chat_id, job.data)
 
-# if reminder, missed (e.g. the bot was briefly busy at that second)
+# if reminder, missed due to error or the bot was briefly busy at that second
 #fires 60 second after if missed.
 #basically this function is a wrapper around the alarm function that schedules it to run once at the specified time, with a 60 second grace period for misfires.
-def schedule_alarm(job_queue, when, chat_id, data):
+#all the main functions should call this function to schedule a reminder, rather than calling alarm() directly.
+def schedule_alarm_helper(job_queue, when, chat_id, data):
     job_queue.run_once(alarm, when=when, chat_id=chat_id, data=data,
                        job_kwargs={"misfire_grace_time": 60})
 
 #schedule the task using the /schedule command, takes in a message and a time in HH:MM format
 #fallback if AI scheduling is down or does not work, requires strict formatting but is more likely to schedule correctly if the user follows the format
-async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args or len(context.args) < 3:
         await update.message.reply_text("❗Please provide a item to schedule in the following format:\n/schedule <item> <date in YYYY-MM-DD format> <time in HH:MM format>")
         return
@@ -374,17 +402,17 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     
     #if an identical task already exists for this user, append " (1)", " (2)", ... to keep it distinct
-    message = unique_item_name(context.job_queue, user_id, message)
+    message = unique_item_name_helper(context.job_queue, user_id, message)
     await update.message.reply_text(
                                     f"✅Scheduled {message} at {time} on {scheduled_time.strftime(DISPLAY_DATE)}."
                                     f"\n\n"
                                     f"You will be reminded at the scheduled time."
                                     )
-    schedule_alarm(context.job_queue, scheduled_time, user_id, message)
-    add_task(user_id, message, scheduled_time.strftime("%Y-%m-%d %H:%M:%S"))
+    schedule_alarm_helper(context.job_queue, scheduled_time, user_id, message)
+    add_task_helper(user_id, message, scheduled_time.strftime("%Y-%m-%d %H:%M:%S"))
 
 #scheduling with AI parsing
-async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def ai_schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = " ".join(context.args) #extracts the message from the command arguments
     user_id = update.effective_user.id
 
@@ -407,7 +435,7 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         2. Convert the requested time to a 24-hour format (YYYY-MM-DD HH:MM:SS).
         3. If no date is specified, assume today (or tomorrow if the requested time has already passed today).
         4. If no time is specified, default to 09:00:00.
-        5. "task" must ALWAYS be a non-empty string. Never return null, None, or an empty value for "task"; if the task is unclear, use the word "reminder".
+        5. "task" must ALWAYS be a non-empty string. Never return null, None, or an empty value for "task". If the task is unclear, use the word "reminder".
         
         Return ONLY a valid JSON object matching this exact structure. Do not include markdown blocks or any other text:
         {{"task": "clean room", "target_datetime": "YYYY-MM-DD HH:MM:SS"}}
@@ -436,15 +464,15 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
         #if an identical task already exists for this user, append " (1)", " (2)", ... to keep it distinct
-        item = unique_item_name(context.job_queue, user_id, item)
+        item = unique_item_name_helper(context.job_queue, user_id, item)
 
         await update.message.reply_text(f""
                                         f"✅Scheduled {item} at {actual_time.strftime(DISPLAY_DATETIME)}.\n"
                                         f"\n"
                                         f"You will be reminded at the scheduled time.\n"
                                         f"⚠️AI may make mistakes, please double check the scheduled time and date. If it is wrong, please reschedule with a more specific time and date.")
-        schedule_alarm(context.job_queue, actual_time, user_id, item)
-        add_task(user_id, item, actual_time.strftime("%Y-%m-%d %H:%M:%S"))
+        schedule_alarm_helper(context.job_queue, actual_time, user_id, item)
+        add_task_helper(user_id, item, actual_time.strftime("%Y-%m-%d %H:%M:%S"))
 
     except Exception as e:
         logging.warning(f"ai_schedule failed for user {user_id}: {e}")  # keep visibility into AI/JSON failures
@@ -452,7 +480,7 @@ async def ai_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
 #delete helper function that shows a numbered list and waits for the user to reply with a number
-async def delete_helper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     #only this user's live, scheduled jobs, sorted by time so the numbering is stable
     jobs = sorted(
@@ -478,7 +506,7 @@ async def delete_helper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(message)
 
 #deletes the task the user picked by number from the list, main delete function that actually removes the task from the job queue and the file
-async def delete_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def delete_main_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     options = context.user_data.pop('delete_options', None)
     if not options:
         await update.message.reply_text("🐴 Nothing to delete right now. Type /delete to start again.")
@@ -495,14 +523,14 @@ async def delete_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for job in context.job_queue.jobs():
         if job.data == task_to_delete and job.chat_id == user_id:
             job.schedule_removal()
-            remove_task(user_id, task_to_delete)  # also drop it from the file
+            remove_task_helper(user_id, task_to_delete)  # also drop it from the file
             await update.message.reply_text(f"✅Deleted task: {task_to_delete}")
             return
 
     await update.message.reply_text(f"❗Task not found (it may have already fired): {task_to_delete}")
 
 #logs every incoming message per user
-async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def log_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     msg = update.effective_message
     if user and msg:
@@ -520,7 +548,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 #hidden owner-only command: re-reads .env and updates the authorized users live (no restart needed).
 #deliberately NOT in /help or the buttons - only the OWNER_ID account can use it.
-async def reload_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def reload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     #silently ignore anyone who isn't the owner
     if update.effective_user.id != OWNER_ID:
         logging.warning(f"Non-owner {update.effective_user.id} tried /reload")
@@ -551,21 +579,21 @@ if __name__ == "__main__":
     allowed_users = filters.User(user_id=ALLOWED_USERS)
 
     #basic commands that anyone can use
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
 
-    #hidden owner-only command - no filter here; reload_config checks OWNER_ID itself and ignores everyone else
-    app.add_handler(CommandHandler("reload", reload_config))
+    #hidden owner-only command - no filter here, reload_command checks OWNER_ID itself and ignores everyone else
+    app.add_handler(CommandHandler("reload", reload_command))
 
     #only allow authorized users for below commands
     #app.add_handler binds to slash commands, filters=allowed_users ensures only authorized users can use the command
-    app.add_handler(CommandHandler("hello", hello, filters=allowed_users)) 
-    app.add_handler(CommandHandler("chat", chat, filters=allowed_users))
-    app.add_handler(CommandHandler("schedule", schedule, filters=allowed_users))
-    app.add_handler(CommandHandler("ai_schedule", ai_schedule, filters=allowed_users))
-    app.add_handler(CommandHandler("list", list_tasks, filters=allowed_users))
-    app.add_handler(CommandHandler("delete", delete_helper, filters=allowed_users)) #delete_helper shows a numbered list and waits for a number reply, delete_main actually deletes the task
-    app.add_handler(CommandHandler("generate_image", generate_image, filters=allowed_users)) #generate an image from a prompt using AI
+    app.add_handler(CommandHandler("hello", hello_command, filters=allowed_users))
+    app.add_handler(CommandHandler("chat", chat_command, filters=allowed_users))
+    app.add_handler(CommandHandler("schedule", schedule_command, filters=allowed_users))
+    app.add_handler(CommandHandler("ai_schedule", ai_schedule_command, filters=allowed_users))
+    app.add_handler(CommandHandler("list", list_tasks_command, filters=allowed_users))
+    app.add_handler(CommandHandler("delete", delete_command, filters=allowed_users)) #delete_command shows a numbered list and waits for a number reply, delete_main_command actually deletes the task
+    app.add_handler(CommandHandler("generate_image", generate_image_command, filters=allowed_users)) #generate an image from a prompt using AI
     
     #job queue for daily reminders
     job_queue = app.job_queue
@@ -574,17 +602,17 @@ if __name__ == "__main__":
     now = datetime.datetime.now(sg_tz)
     still_valid = []
     #build a list of still-valid tasks and re-schedule them in the job queue per user, dropping any that have already passed
-    for t in load_tasks():
+    for t in load_tasks_helper():
         try:
             scheduled_time = sg_tz.localize(datetime.datetime.strptime(t["time"], "%Y-%m-%d %H:%M:%S"))
             if scheduled_time > now:
-                schedule_alarm(job_queue, scheduled_time, t["user_id"], t["item"])
+                schedule_alarm_helper(job_queue, scheduled_time, t["user_id"], t["item"])
                 still_valid.append(t)
         except (KeyError, TypeError, ValueError) as e:
             #skip bad entries
             logging.warning(f"Skipping bad task in {TASKS_FILE}: {t} ({e})")
             continue
-    save_tasks(still_valid)
+    save_tasks_helper(still_valid)
 
     #daily reminder job, runs at 9:00 AM Singapore time every day
     job_queue.run_daily(daily_reminder, time=datetime.time(hour=9, minute=0, second=0, tzinfo=sg_tz))  # Sends reminder at 9:00 AM every day
@@ -593,10 +621,10 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_handler))
 
     #plain text from authorized users feeds button prompts (chat/schedule/ai_schedule)
-    app.add_handler(MessageHandler(allowed_users & filters.TEXT & ~filters.COMMAND, text_input)) #not COMMAND so that it doesn't trigger on slash commands
+    app.add_handler(MessageHandler(allowed_users & filters.TEXT & ~filters.COMMAND, text_input_handler)) #not COMMAND so that it doesn't trigger on slash commands
 
     #logs all messages and button presses to console for debugging
-    app.add_handler(MessageHandler(filters.ALL, log_message), group=-1)
+    app.add_handler(MessageHandler(filters.ALL, log_message_handler), group=-1)
 
     #catches ALL errors
     app.add_error_handler(error_handler)
